@@ -13,7 +13,11 @@ class BiRefNet(object):
         self.birefnet_model.eval()
         self.device = device
 
-    def run(self, image):
+    def run(self, image, use_alpha=False):
+        if use_alpha:
+            if image.mode != 'RGBA':
+                image = image.convert('RGBA')
+            return np.array(image)
         image = image.convert('RGB')
         image_size = (1024, 1024)
         transform_image = transforms.Compose([

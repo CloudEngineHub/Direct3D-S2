@@ -2,12 +2,14 @@
 import itertools
 import torch
 import torch.nn as nn
+import numpy as np
 import torch.nn.functional as F
 from .unet3d import UNet3DModel
 import trimesh
 from tqdm import tqdm
 from skimage import measure
-from ...modules.utils import convert_module_to_f16, convert_module_to_f32
+from direct3d_s2.modules.utils import convert_module_to_f16, convert_module_to_f32
+import direct3d_s2.modules.sparse as sp
 
 
 def adaptive_conv(inputs,weights):
@@ -200,4 +202,98 @@ class Voxel_RefinerXL(nn.Module):
         
         return meshes
 
+
+class Voxel_RefinerXL_sign(nn.Module):
+    def __init__(self,
+                in_channels: int=1,
+                out_channels: int=1,
+                layers_per_block: int=2,
+                layers_mid_block: int=2,
+                patch_size: int=192,
+                res: int=512,
+                infer_patch_size: int=192,
+                use_checkpoint: bool=False,
+                use_fp16: bool = False):
+        super().__init__()
+
+        self.unet3d1 = UNet3DModel(in_channels=8, out_channels=8, use_conv_out=False, 
+                                   layers_per_block=layers_per_block, layers_mid_block=layers_mid_block, 
+                                   block_out_channels=(8,32,128,512), norm_num_groups=4, use_checkpoint=use_checkpoint)
+        self.conv_in = nn.Conv3d(in_channels, 8, kernel_size=3, padding=1)
+        self.conv_out = nn.Conv3d(8, out_channels, kernel_size=3, padding=1)
+        self.downsample = sp.SparseDownsample(factor=2)
+        self.patch_size = patch_size
+        self.infer_patch_size = infer_patch_size
+        self.res = res
+       
+        self.use_fp16 = use_fp16
+        self.dtype = torch.float16 if use_fp16 else torch.float32
+        if use_fp16:
+            self.convert_to_fp16()
+
+    def convert_to_fp16(self) -> None:
+        self.apply(convert_module_to_f16)
+    
+    def run(self,
+             reconst_x=None,
+             feat=None, 
+             mc_threshold=0,
+        ):
+        batch_size = int(reconst_x.coords[..., 0].max()) + 1
+        sparse_sdf, sparse_index = reconst_x.feats, reconst_x.coords
+        device = sparse_sdf.device
+        voxel_resolution = 1024
+        sdfs=[]
+        for i in range(batch_size):
+            idx = sparse_index[..., 0] == i
+            sparse_sdf_i, sparse_index_i = sparse_sdf[idx].squeeze(-1),  sparse_index[idx][..., 1:]
+            sdf = torch.ones((voxel_resolution, voxel_resolution, voxel_resolution)).to(device).to(sparse_sdf_i.dtype)
+            sdf[sparse_index_i[..., 0], sparse_index_i[..., 1], sparse_index_i[..., 2]] = sparse_sdf_i
+            sdfs.append(sdf.unsqueeze(0))
+
+        sdfs1024 = torch.stack(sdfs,dim=0)
+        reconst_x1024 = reconst_x
+        reconst_x = self.downsample(reconst_x)
+        batch_size = int(reconst_x.coords[..., 0].max()) + 1
+        sparse_sdf, sparse_index = reconst_x.feats, reconst_x.coords
+        device = sparse_sdf.device
+        dtype = sparse_sdf.dtype
+        voxel_resolution = 512
+        sdfs = torch.ones((batch_size, voxel_resolution, voxel_resolution, voxel_resolution),device=device, dtype=sparse_sdf.dtype)
+        sdfs[sparse_index[...,0],sparse_index[...,1],sparse_index[...,2],sparse_index[...,3]] = sparse_sdf.squeeze(-1)
+        sdfs = sdfs.unsqueeze(1)
+        
+        N = sdfs.shape[0]
+        outputs = torch.ones([N,1,512,512,512],device=sdfs.device, dtype=dtype)
+        stride = 128
+        patch_size = self.patch_size
+        step = 3
+        for i in range(step):
+            for j in range(step):
+                for k in tqdm(range(step)):
+                    sdf = sdfs[:,:,stride*i:stride*i+patch_size,stride*j:stride*j+patch_size,stride*k:stride*k+patch_size]
+                    inputs = self.conv_in(sdf)
+                    mid_feat = self.unet3d1(inputs)  
+                    final_feat = self.conv_out(mid_feat)
+                    output = F.sigmoid(final_feat)
+                    output[output>=0.5] = 1
+                    output[output<0.5] = -1
+                    outputs[:, :, stride*i:stride*i+patch_size, stride*j:stride*j+patch_size, stride*k:stride*k+patch_size] = output
+        outputs = outputs.repeat_interleave(2, dim=2).repeat_interleave(2, dim=3).repeat_interleave(2, dim=4)
+        sdfs = sdfs1024.clone()
+        sdfs = sdfs.abs()*outputs
+        
+        sparse_index1024 = reconst_x1024.coords
+        
+        sdfs[sparse_index1024[...,0], :, sparse_index1024[...,1], sparse_index1024[...,2],sparse_index1024[...,3]] = sdfs1024[sparse_index1024[...,0], :, sparse_index1024[...,1], sparse_index1024[...,2], sparse_index1024[...,3]]
+        outputs = sdfs.cpu().numpy()
+        grid_size = outputs.shape[2]
+
+        meshes = []
+        for i in range(outputs.shape[0]):
+            outputs_torch = outputs[i,0]
+            vertices, faces, _, _ = measure.marching_cubes(outputs_torch, level=mc_threshold, method="lewiner")
+            vertices = vertices / grid_size * 2 - 1
+            meshes.append(trimesh.Trimesh(vertices, faces))
+        return meshes
 

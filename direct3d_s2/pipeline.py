@@ -28,6 +28,7 @@ class Direct3DS2Pipeline(object):
                  sparse_vae_1024,
                  sparse_dit_1024,
                  refiner,
+                 refiner_1024,
                  dense_image_encoder,
                  sparse_image_encoder,
                  dense_scheduler,
@@ -42,6 +43,7 @@ class Direct3DS2Pipeline(object):
         self.sparse_vae_1024 = sparse_vae_1024
         self.sparse_dit_1024 = sparse_dit_1024
         self.refiner = refiner
+        self.refiner_1024 = refiner_1024
         self.dense_image_encoder = dense_image_encoder
         self.sparse_image_encoder = sparse_image_encoder
         self.dense_scheduler = dense_scheduler
@@ -58,6 +60,7 @@ class Direct3DS2Pipeline(object):
         self.sparse_vae_1024.to(device)
         self.sparse_dit_1024.to(device)
         self.refiner.to(device)
+        self.refiner_1024.to(device)
         self.dense_image_encoder.to(device)
         self.sparse_image_encoder.to(device)
 
@@ -70,6 +73,7 @@ class Direct3DS2Pipeline(object):
             model_sparse_512_path = os.path.join(pipeline_path, 'model_sparse_512.ckpt')
             model_sparse_1024_path = os.path.join(pipeline_path, 'model_sparse_1024.ckpt')
             model_refiner_path = os.path.join(pipeline_path, 'model_refiner.ckpt')
+            model_refiner_1024_path = os.path.join(pipeline_path, 'model_refiner_1024.ckpt')
         else:
             config_path = hf_hub_download(
                 repo_id=pipeline_path, 
@@ -99,6 +103,12 @@ class Direct3DS2Pipeline(object):
                 repo_id=pipeline_path, 
                 subfolder=subfolder,
                 filename="model_refiner.ckpt", 
+                repo_type="model"
+            )
+            model_refiner_1024_path = hf_hub_download(
+                repo_id=pipeline_path, 
+                subfolder=subfolder,
+                filename="model_refiner_1024.ckpt", 
                 repo_type="model"
             )
 
@@ -133,6 +143,11 @@ class Direct3DS2Pipeline(object):
         refiner.load_state_dict(state_dict_refiner["refiner"], strict=True)
         refiner.eval()
 
+        state_dict_refiner_1024 = torch.load(model_refiner_1024_path, map_location='cpu', weights_only=True)
+        refiner_1024 = instantiate_from_config(cfg.refiner_1024)
+        refiner_1024.load_state_dict(state_dict_refiner_1024["refiner"], strict=True)
+        refiner_1024.eval()
+
         dense_image_encoder = instantiate_from_config(cfg.dense_image_encoder)
         sparse_image_encoder = instantiate_from_config(cfg.sparse_image_encoder)
 
@@ -153,6 +168,7 @@ class Direct3DS2Pipeline(object):
             sparse_scheduler_512=sparse_scheduler_512,
             sparse_scheduler_1024=sparse_scheduler_1024,
             refiner=refiner,
+            refiner_1024=refiner_1024,
         )
 
     def preprocess(self, image):
@@ -288,7 +304,10 @@ class Direct3DS2Pipeline(object):
         if remove_interior:
             del latents, noise_pred, noise_pred_cond, noise_pred_uncond, x_input, cond, uncond
             torch.cuda.empty_cache()
-            outputs = self.refiner.run(*outputs, mc_threshold=mc_threshold*2.0)
+            if mode == 'sparse512':
+                outputs = self.refiner.run(*outputs, mc_threshold=mc_threshold*2.0)
+            elif mode == 'sparse1024':
+                outputs = self.refiner_1024.run(*outputs, mc_threshold=mc_threshold)
 
         return outputs
     
@@ -303,7 +322,8 @@ class Direct3DS2Pipeline(object):
         generator: Optional[torch.Generator] = None,
         remesh: bool = False,
         simplify_ratio: float = 0.95,
-        mc_threshold: float = 0.2):
+        mc_threshold: float = 0.2,
+        remove_interior: bool = True):
 
         image = self.prepare_image(image)
         
@@ -314,16 +334,11 @@ class Direct3DS2Pipeline(object):
 
         torch.cuda.empty_cache()
 
-        if sdf_resolution == 512:
-            remove_interior = False
-        else:
-            remove_interior = True
-
         mesh = self.inference(image, self.sparse_vae_512, self.sparse_dit_512, 
                                 self.sparse_image_encoder, self.sparse_scheduler_512, 
                                 generator=generator, mode='sparse512', 
                                 mc_threshold=mc_threshold, latent_index=latent_index, 
-                                remove_interior=remove_interior, **sparse_512_sampler_params)[0]
+                                remove_interior=True, **sparse_512_sampler_params)[0]
 
         if sdf_resolution == 1024:
             del latent_index
@@ -337,7 +352,7 @@ class Direct3DS2Pipeline(object):
                                 self.sparse_image_encoder, self.sparse_scheduler_1024, 
                                 generator=generator, mode='sparse1024', 
                                 mc_threshold=mc_threshold, latent_index=latent_index, 
-                                **sparse_1024_sampler_params)[0]
+                                remove_interior=remove_interior, **sparse_1024_sampler_params)[0]
             
         if remesh:
             import trimesh

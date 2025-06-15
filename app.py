@@ -65,9 +65,6 @@ def image2mesh(
     uid = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     image.save(os.path.join(output_path, uid + '.png'))
 
-    pipe = Direct3DS2Pipeline.from_pretrained('wushuang98/Direct3D-S2', subfolder="direct3d-s2-v-1-1")
-    pipe.to("cuda:0")
-
     mesh = pipe(
         image, 
         sdf_resolution=int(resolution), 
@@ -88,6 +85,10 @@ def image2mesh(
 # -----------------------------------------------------------------------------
 #  UI LAYOUT  ▸  minimal glassmorphism, keyboard-first workflow
 # -----------------------------------------------------------------------------
+
+pipe = Direct3DS2Pipeline.from_pretrained('wushuang98/Direct3D-S2', subfolder="direct3d-s2-v-1-1")
+pipe.to("cuda:0")
+
 with gr.Blocks(theme=Glass(), css="""
 :root { --header-height:64px }
 body { background:linear-gradient(215deg,#101113 0%,#0b0c0d 60%,#0d1014 100%) }
@@ -125,7 +126,6 @@ body { background:linear-gradient(215deg,#101113 0%,#0b0c0d 60%,#0d1014 100%) }
                 height=260, 
                 elem_id="show_image",
             )
-            # gr.Markdown("<div style='text-align:center;opacity:.6'>Drag & drop or click to upload</div>")  
             processed_image = gr.Image(
                 label="Processed Image",
                 image_mode="RGBA",
@@ -135,6 +135,7 @@ body { background:linear-gradient(215deg,#101113 0%,#0b0c0d 60%,#0d1014 100%) }
                 elem_id="show_image",
             )
             with gr.Accordion("Advanced Options", open=True):
+                use_alpha = gr.Checkbox(label="Use Alpha Channel", value=False)
                 resolution = gr.Radio(choices=["512", "1024"], label="SDF Resolution", value="1024")
                 simplify = gr.Checkbox(label="Simplify Mesh", value=True)
                 reduce_ratio = gr.Slider(0.1, 0.95, step=0.05, value=0.95, label="Faces Reduction Ratio")
@@ -155,13 +156,6 @@ body { background:linear-gradient(215deg,#101113 0%,#0b0c0d 60%,#0d1014 100%) }
         # ---------- Gallery / Examples ----------
         with gr.Column(scale=3):
             gr.Markdown("### Examples", elem_classes="subtitle")
-            # gr.Examples(
-            #     examples=[os.path.join("assets/test", i) for i in os.listdir("assets/test")],
-            #     inputs=[image_input],
-            #     examples_per_page=8,
-            #     label="Gallery",
-            #     elem_id="examples_gallery",
-            # )
             with gr.Tabs(selected='tab_img_gallery') as gallery:
                 with gr.Tab('Image to 3D Gallery', id='tab_img_gallery') as tab_gi:
                     with gr.Row():
@@ -171,15 +165,7 @@ body { background:linear-gradient(215deg,#101113 0%,#0b0c0d 60%,#0d1014 100%) }
                             label=None, 
                             examples_per_page=24
                         )
-            # gallery = gr.Gallery(
-            #     [os.path.join("assets/test", i) for i in os.listdir("assets/test")],
-            #     columns=2,
-            #     object_fit="contain",
-            #     elem_id="examples_gallery",
-            #     allow_preview=False,
-            # )
 
-            
     # ▸ callbacks
     outputs = [output_model_obj]
     rmbg = BiRefNet(device="cuda:0")
@@ -189,7 +175,7 @@ body { background:linear-gradient(215deg,#101113 0%,#0b0c0d 60%,#0d1014 100%) }
         inputs=[image_input]
     ).success(
         fn=rmbg.run, 
-        inputs=[image_input],
+        inputs=[image_input, use_alpha],
         outputs=[processed_image]
     ).success(
         fn=image2mesh, 

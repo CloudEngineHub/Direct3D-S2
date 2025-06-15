@@ -83,6 +83,7 @@ pipeline.to("cuda:0")
 mesh = pipeline(
   'assets/test/13.png', 
   sdf_resolution=1024, # 512 or 1024
+  remove_interior=True,
   remesh=False, # Switch to True if you need to reduce the number of triangles.
 )["mesh"]
 
